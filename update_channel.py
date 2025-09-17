@@ -5,6 +5,20 @@ import requests
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timedelta
 
+# right under imports in update_channel.py
+from datetime import datetime, timezone
+
+# Use UTC for all time computations (compupro uses epoch ms in UTC)
+def now_ms_utc():
+    return datetime.now(timezone.utc).timestamp() * 1000.0
+
+# Replace any `datetime.now().timestamp()*1000.0` usage with now_ms_utc()
+# Also add a quick log at start of main() to see exact run time:
+def main():
+    print("=== GitHub Action run at (UTC):", datetime.now(timezone.utc).isoformat())
+    # existing code...
+
+
 # ----- CONFIG (edit only if you want to change behavior) -----
 COMPUPRO_URL = "https://compupro.github.io/rp-time-calculator/?daysperyear=7&lastdatechange=1757721600000&lastdateepoch=-4449513600000&fixedyears=true"
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1417630872924061846"))
