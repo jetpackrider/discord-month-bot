@@ -67,7 +67,12 @@ def compute_channel_name():
     mname = MONTH_NAMES[(info["current_month"] - 1) % 12]
     return f"📅 {mname} {info['current_year']}", info
 
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+import json
+
 def http_get(url, token=None, timeout=15):
+    """Return (body_text, status_code) or raise HTTPError/URLError."""
     headers = {}
     if token:
         headers["Authorization"] = f"Bot {token}"
@@ -76,8 +81,12 @@ def http_get(url, token=None, timeout=15):
         return resp.read().decode("utf-8"), resp.getcode()
 
 def http_patch_json(url, token, data, timeout=15):
+    """PATCH JSON and return (body_text, status_code)."""
     body = json.dumps(data).encode("utf-8")
-    headers = {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bot {token}",
+        "Content-Type": "application/json"
+    }
     req = Request(url, data=body, headers=headers, method="PATCH")
     with urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8"), resp.getcode()
