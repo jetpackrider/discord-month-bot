@@ -1,25 +1,49 @@
 #!/usr/bin/env python3
-# update_channel.py — improved debug/logging (stdlib only)
+"""
+update_channel.py - full replacement (stdlib-only)
 
-import os, math, json
+- Computes RP month/year from the Compupro URL anchor parameters.
+- Uses urllib to GET the channel and PATCH the name only when needed.
+- Logs UTC times and helpful diagnostics.
+- Expects DISCORD_TOKEN in env (and optional CHANNEL_ID).
+"""
+
 from urllib.parse import urlparse, parse_qs
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+import json, os, math, sys
 
+# ---------------- CONFIG ----------------
 COMPUPRO_URL = "https://compupro.github.io/rp-time-calculator/?daysperyear=7&lastdatechange=1757721600000&lastdateepoch=-4449513600000&fixedyears=true"
+
+# Default channel id: override with CHANNEL_ID env var or set as secret
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1417630872924061846"))
+
+# Bot token MUST be set as an environment variable (GitHub secret: DISCORD_TOKEN)
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
-    raise SystemExit("DISCORD_TOKEN environment variable not set.")
+    print("ERROR: DISCORD_TOKEN environment variable not set. Add it to GitHub Secrets.", file=sys.stderr)
+    sys.exit(1)
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
-MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"]
+MONTH_NAMES = [
+    "January","February","March","April","May","June",
+    "July","August","September","October","November","December"
+]
 
+# ---------------- Helpers ----------------
 def now_ms_utc():
     return datetime.now(timezone.utc).timestamp() * 1000.0
 
+def iso_utc_from_ms(ms):
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat()
+
 def rp_from_compupro_url(url):
+    """
+    Parse compupro URL query params and compute current RP year/month.
+    Returns a dict with useful diagnostics.
+    """
     qs = parse_qs(urlparse(url).query)
     daysperyear = int(qs.get("daysperyear", ["7"])[0])
     lastdatechange_ms = int(qs.get("lastdatechange")[0])
@@ -41,38 +65,34 @@ def rp_from_compupro_url(url):
 
     current_year = anchor_rp_dt.year + years_elapsed
     current_month = (total_months % MONTHS_PER_YEAR) + 1
-    ms_into_month = elapsed_ms - (total_months * month_ms)
+    ms_into_month = int(elapsed_ms - (total_months * month_ms))
 
-    # Compute next month start (real ms) and next year rollover (real ms)
+    # next month start ms (real time)
     next_month_boundary_months = total_months + 1
-    next_month_start_ms = anchor_real_ms + next_month_boundary_months * month_ms
+    next_month_start_ms = int(anchor_real_ms + next_month_boundary_months * month_ms)
 
-    # find the next time the RP year label increases (every 12 months)
-    months_until_year_end = MONTHS_PER_YEAR - ( (total_months % MONTHS_PER_YEAR) + 1 ) + 1
-    # months_until_year_end = number of months remaining until next year boundary (>=1)
-    next_year_start_ms = anchor_real_ms + (total_months + months_until_year_end) * month_ms
+    # next year start ms: compute when RP year label increments (every 12 months)
+    months_until_year_end = MONTHS_PER_YEAR - ((total_months % MONTHS_PER_YEAR) + 1) + 1
+    next_year_start_ms = int(anchor_real_ms + (total_months + months_until_year_end) * month_ms)
 
     return {
         "current_year": int(current_year),
         "current_month": int(current_month),
-        "ms_into_month": int(ms_into_month),
+        "ms_into_month": ms_into_month,
         "month_ms": int(month_ms),
-        "next_month_start_ms": int(next_month_start_ms),
-        "next_year_start_ms": int(next_year_start_ms),
         "anchor_real_ms": int(anchor_real_ms),
+        "anchor_rp_epoch_ms": int(anchor_rp_epoch_ms),
+        "next_month_start_ms": next_month_start_ms,
+        "next_year_start_ms": next_year_start_ms,
     }
 
 def compute_channel_name():
     info = rp_from_compupro_url(COMPUPRO_URL)
-    mname = MONTH_NAMES[(info["current_month"] - 1) % 12]
-    return f"📅 {mname} {info['current_year']}", info
+    month_name = MONTH_NAMES[(info["current_month"] - 1) % 12]
+    return f"📅 {month_name} {info['current_year']}", info
 
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
-import json
-
+# --------- HTTP helpers using stdlib ----------
 def http_get(url, token=None, timeout=15):
-    """Return (body_text, status_code) or raise HTTPError/URLError."""
     headers = {}
     if token:
         headers["Authorization"] = f"Bot {token}"
@@ -81,7 +101,6 @@ def http_get(url, token=None, timeout=15):
         return resp.read().decode("utf-8"), resp.getcode()
 
 def http_patch_json(url, token, data, timeout=15):
-    """PATCH JSON and return (body_text, status_code)."""
     body = json.dumps(data).encode("utf-8")
     headers = {
         "Authorization": f"Bot {token}",
@@ -91,25 +110,29 @@ def http_patch_json(url, token, data, timeout=15):
     with urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8"), resp.getcode()
 
-def iso_ms(ms):
-    return datetime.fromtimestamp(ms/1000.0, tz=timezone.utc).isoformat()
-
+# ---------------- Main ----------------
 def main():
     run_time = datetime.now(timezone.utc)
-    print("=== Action run UTC:", run_time.isoformat())
+    print("=== Run UTC:", run_time.isoformat())
     new_name, info = compute_channel_name()
     print("Computed channel name:", new_name)
-    print("  current_year:", info["current_year"], "current_month:", info["current_month"])
-    print("  ms into month:", info["ms_into_month"], "month length ms:", info["month_ms"])
-    print("  next_month_start (UTC):", iso_ms(info["next_month_start_ms"]))
-    print("  next_year_start (UTC):", iso_ms(info["next_year_start_ms"]))
-    print("  anchor real ms (UTC):", iso_ms(info["anchor_real_ms"]))
+    print(f"  current_year: {info['current_year']} current_month: {info['current_month']}")
+    print(f"  ms into month: {info['ms_into_month']} month length ms: {info['month_ms']}")
+    print("  next_month_start (UTC):", iso_utc_from_ms(info["next_month_start_ms"]))
+    print("  next_year_start (UTC):", iso_utc_from_ms(info["next_year_start_ms"]))
+    print("  anchor real ms (UTC):", iso_utc_from_ms(info["anchor_real_ms"]))
 
     channel_url = f"{DISCORD_API_BASE}/channels/{CHANNEL_ID}"
     try:
-        info_text, code = http_get(channel_url, TOKEN)
+        body, status = http_get(channel_url, TOKEN)
     except HTTPError as e:
-        print("GET channel HTTPError:", e.code, e.reason)
+        # print helpful error body if available
+        print(f"GET channel HTTPError: {e.code} {e.reason}")
+        try:
+            err = e.read().decode("utf-8")
+            print("GET error body:", err)
+        except Exception:
+            pass
         return
     except URLError as e:
         print("GET channel URLError:", e)
@@ -118,30 +141,32 @@ def main():
         print("GET channel unexpected error:", e)
         return
 
-    if code != 200:
-        print("GET channel returned non-200:", code, info_text)
+    if status != 200:
+        print("GET channel returned non-200:", status, body)
         return
 
     try:
-        channel_info = json.loads(info_text)
+        info_json = json.loads(body)
     except Exception as e:
-        print("Failed parse JSON:", e)
+        print("Failed to parse channel JSON:", e)
         return
 
-    current_name = channel_info.get("name")
+    current_name = info_json.get("name")
     print("Current channel name:", current_name)
 
     if current_name == new_name:
         print("Channel name already up to date; nothing to do.")
         return
 
+    # Attempt patch
     try:
         resp_text, resp_code = http_patch_json(channel_url, TOKEN, {"name": new_name})
     except HTTPError as e:
-        print("PATCH HTTPError:", e.code, e.reason)
+        print(f"PATCH HTTPError: {e.code} {e.reason}")
         try:
-            print("Response:", e.read().decode("utf-8"))
-        except:
+            err = e.read().decode("utf-8")
+            print("PATCH error body:", err)
+        except Exception:
             pass
         return
     except URLError as e:
