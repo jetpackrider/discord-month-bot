@@ -1,137 +1,113 @@
 #!/usr/bin/env python3
 """
-update_channel.py - full replacement (stdlib-only)
+debug_channel_perms.py
 
-- Computes RP month/year from the Compupro URL anchor parameters.
-- Uses urllib to GET the channel and PATCH the name only when needed.
-- Logs UTC times and helpful diagnostics.
-- Expects DISCORD_TOKEN in env (and optional CHANNEL_ID).
+Fetches channel, guild roles, bot member info and computes effective channel permissions
+for the running bot user to help explain 403 Forbidden errors.
+No external deps (stdlib only).
 """
 
-from urllib.parse import urlparse, parse_qs
+import os
+import json
+from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from datetime import datetime, timezone
-import json, os, math, sys
-
-# ---------------- CONFIG ----------------
-COMPUPRO_URL = "https://compupro.github.io/rp-time-calculator/?daysperyear=7&lastdatechange=1757721600000&lastdateepoch=-4449513600000&fixedyears=true"
-
-# Default channel id: override with CHANNEL_ID env var or set as secret
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1417630872924061846"))
-
-# Bot token MUST be set as an environment variable (GitHub secret: DISCORD_TOKEN)
-TOKEN = os.getenv("DISCORD_TOKEN")
-if not TOKEN:
-    print("ERROR: DISCORD_TOKEN environment variable not set. Add it to GitHub Secrets.", file=sys.stderr)
-    sys.exit(1)
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
-MONTH_NAMES = [
-    "January","February","March","April","May","June",
-    "July","August","September","October","November","December"
-]
 
-# ---------------- Helpers ----------------
-def now_ms_utc():
-    return datetime.now(timezone.utc).timestamp() * 1000.0
+# Permission bits
+PERM_ADMIN = 0x00000008
+PERM_MANAGE_CHANNELS = 0x00000010
+PERM_VIEW_CHANNEL = 0x00000400
 
-def iso_utc_from_ms(ms):
-    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat()
+TOKEN = os.getenv("DISCORD_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID", "1417630872924061846")
 
-def rp_from_compupro_url(url):
-    """
-    Parse compupro URL query params and compute current RP year/month.
-    Returns a dict with useful diagnostics.
-    """
-    qs = parse_qs(urlparse(url).query)
-    daysperyear = int(qs.get("daysperyear", ["7"])[0])
-    lastdatechange_ms = int(qs.get("lastdatechange")[0])
-    lastdateepoch_ms = int(qs.get("lastdateepoch")[0])
+if not TOKEN:
+    raise SystemExit("Set DISCORD_TOKEN environment variable before running this script.")
 
-    MONTHS_PER_YEAR = 12
-    hours_per_month = (daysperyear * 24) / MONTHS_PER_YEAR
-    month_ms = hours_per_month * 3600 * 1000
-
-    anchor_real_ms = lastdatechange_ms
-    anchor_rp_epoch_ms = lastdateepoch_ms
-
-    now_ms = now_ms_utc()
-    elapsed_ms = now_ms - anchor_real_ms
-
-    total_months = math.floor(elapsed_ms / month_ms)
-    years_elapsed = total_months // MONTHS_PER_YEAR
-    anchor_rp_dt = datetime.utcfromtimestamp(anchor_rp_epoch_ms / 1000.0)
-
-    current_year = anchor_rp_dt.year + years_elapsed
-    current_month = (total_months % MONTHS_PER_YEAR) + 1
-    ms_into_month = int(elapsed_ms - (total_months * month_ms))
-
-    # next month start ms (real time)
-    next_month_boundary_months = total_months + 1
-    next_month_start_ms = int(anchor_real_ms + next_month_boundary_months * month_ms)
-
-    # next year start ms: compute when RP year label increments (every 12 months)
-    months_until_year_end = MONTHS_PER_YEAR - ((total_months % MONTHS_PER_YEAR) + 1) + 1
-    next_year_start_ms = int(anchor_real_ms + (total_months + months_until_year_end) * month_ms)
-
-    return {
-        "current_year": int(current_year),
-        "current_month": int(current_month),
-        "ms_into_month": ms_into_month,
-        "month_ms": int(month_ms),
-        "anchor_real_ms": int(anchor_real_ms),
-        "anchor_rp_epoch_ms": int(anchor_rp_epoch_ms),
-        "next_month_start_ms": next_month_start_ms,
-        "next_year_start_ms": next_year_start_ms,
-    }
-
-def compute_channel_name():
-    info = rp_from_compupro_url(COMPUPRO_URL)
-    month_name = MONTH_NAMES[(info["current_month"] - 1) % 12]
-    return f"📅 {month_name} {info['current_year']}", info
-
-# --------- HTTP helpers using stdlib ----------
-def http_get(url, token=None, timeout=15):
-    headers = {}
-    if token:
-        headers["Authorization"] = f"Bot {token}"
-    req = Request(url, headers=headers, method="GET")
-    with urlopen(req, timeout=timeout) as resp:
+def http_get(path):
+    url = urljoin(DISCORD_API_BASE, path)
+    req = Request(url, headers={"Authorization": f"Bot {TOKEN}"}, method="GET")
+    with urlopen(req, timeout=15) as resp:
         return resp.read().decode("utf-8"), resp.getcode()
 
-def http_patch_json(url, token, data, timeout=15):
-    body = json.dumps(data).encode("utf-8")
-    headers = {
-        "Authorization": f"Bot {token}",
-        "Content-Type": "application/json"
-    }
-    req = Request(url, data=body, headers=headers, method="PATCH")
-    with urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8"), resp.getcode()
+def log(msg):
+    print(msg)
 
-# ---------------- Main ----------------
-def main():
-    run_time = datetime.now(timezone.utc)
-    print("=== Run UTC:", run_time.isoformat())
-    new_name, info = compute_channel_name()
-    print("Computed channel name:", new_name)
-    print(f"  current_year: {info['current_year']} current_month: {info['current_month']}")
-    print(f"  ms into month: {info['ms_into_month']} month length ms: {info['month_ms']}")
-    print("  next_month_start (UTC):", iso_utc_from_ms(info["next_month_start_ms"]))
-    print("  next_year_start (UTC):", iso_utc_from_ms(info["next_year_start_ms"]))
-    print("  anchor real ms (UTC):", iso_utc_from_ms(info["anchor_real_ms"]))
+def iso_now():
+    return datetime.now(timezone.utc).isoformat()
 
-    channel_url = f"{DISCORD_API_BASE}/channels/{CHANNEL_ID}"
+def to_int(s):
     try:
-        body, status = http_get(channel_url, TOKEN)
+        return int(s)
+    except:
+        return 0
+
+def compute_effective_perms(base_perms, overwrites, member_role_ids, member_id, guild_id):
+    """
+    base_perms: int (role union)
+    overwrites: list of dicts with keys id, type, allow, deny
+    member_role_ids: list[str]
+    returns: effective_perms int, and details dict
+    """
+    perms = base_perms
+
+    # find @everyone overwrite (role overwrite with id == guild_id)
+    everyone_allow = everyone_deny = 0
+    role_allow = role_deny = 0
+    member_allow = member_deny = 0
+
+    for ow in overwrites:
+        oid = str(ow.get("id"))
+        otype = ow.get("type")  # "role" or "member" in REST (sometimes 0/1)
+        # allow/deny come as strings in some responses
+        allow = to_int(ow.get("allow", 0))
+        deny = to_int(ow.get("deny", 0))
+        # Normalize type: sometimes 'type' is int (0 role, 1 member) or strings 'role'/'member'.
+        role_type = None
+        if isinstance(otype, int):
+            role_type = "role" if otype == 0 else "member"
+        else:
+            role_type = str(otype)
+
+        if role_type == "role" and oid == str(guild_id):
+            everyone_allow |= allow
+            everyone_deny |= deny
+        elif role_type == "role" and oid in member_role_ids:
+            role_allow |= allow
+            role_deny |= deny
+        elif role_type == "member" and oid == str(member_id):
+            member_allow |= allow
+            member_deny |= deny
+
+    # apply everyone overwrite
+    perms = (perms & ~everyone_deny) | everyone_allow
+    # apply role overwrites (aggregated)
+    perms = (perms & ~role_deny) | role_allow
+    # apply member overwrite
+    perms = (perms & ~member_deny) | member_allow
+
+    details = {
+        "everyone_allow": everyone_allow, "everyone_deny": everyone_deny,
+        "role_allow": role_allow, "role_deny": role_deny,
+        "member_allow": member_allow, "member_deny": member_deny
+    }
+    return perms, details
+
+def main():
+    print("=== Debug run UTC:", iso_now())
+    print("Channel ID:", CHANNEL_ID)
+
+    # 1) GET channel
+    try:
+        body, code = http_get(f"/channels/{CHANNEL_ID}")
     except HTTPError as e:
-        # print helpful error body if available
-        print(f"GET channel HTTPError: {e.code} {e.reason}")
+        print("GET channel HTTPError:", e.code, e.reason)
         try:
-            err = e.read().decode("utf-8")
-            print("GET error body:", err)
-        except Exception:
+            print("Body:", e.read().decode("utf-8"))
+        except:
             pass
         return
     except URLError as e:
@@ -141,42 +117,126 @@ def main():
         print("GET channel unexpected error:", e)
         return
 
-    if status != 200:
-        print("GET channel returned non-200:", status, body)
+    if code != 200:
+        print("GET channel returned:", code, body)
         return
 
+    channel = json.loads(body)
+    print("Channel object fetched. name:", channel.get("name"), "type:", channel.get("type"))
+    guild_id = channel.get("guild_id")
+    if not guild_id:
+        print("Channel has no guild_id (maybe it's a DM or invalid).")
+        return
+    print("Guild ID for channel:", guild_id)
+
+    overwrites = channel.get("permission_overwrites", []) or channel.get("permission_overwrites", [])
+    print("Permission overwrites count:", len(overwrites))
+    # print raw overwrites
+    for ow in overwrites:
+        print("  overwrite:", ow)
+
+    # 2) GET bot user info
     try:
-        info_json = json.loads(body)
+        me_body, me_code = http_get("/users/@me")
     except Exception as e:
-        print("Failed to parse channel JSON:", e)
+        print("GET @me failed:", e)
         return
+    me = json.loads(me_body)
+    bot_id = str(me.get("id"))
+    print("Bot user id:", bot_id, "username:", me.get("username"))
 
-    current_name = info_json.get("name")
-    print("Current channel name:", current_name)
-
-    if current_name == new_name:
-        print("Channel name already up to date; nothing to do.")
-        return
-
-    # Attempt patch
+    # 3) GET guild roles
     try:
-        resp_text, resp_code = http_patch_json(channel_url, TOKEN, {"name": new_name})
+        roles_body, roles_code = http_get(f"/guilds/{guild_id}/roles")
     except HTTPError as e:
-        print(f"PATCH HTTPError: {e.code} {e.reason}")
+        print("GET roles HTTPError:", e.code, e.reason)
         try:
-            err = e.read().decode("utf-8")
-            print("PATCH error body:", err)
-        except Exception:
+            print("Body:", e.read().decode("utf-8"))
+        except:
             pass
         return
-    except URLError as e:
-        print("PATCH URLError:", e)
-        return
     except Exception as e:
-        print("PATCH unexpected error:", e)
+        print("GET roles failed:", e)
         return
 
-    print("PATCH returned:", resp_code, resp_text)
+    roles = json.loads(roles_body)
+    # find @everyone role (id == guild_id)
+    everyone_role = None
+    role_map = {}
+    for r in roles:
+        role_map[str(r.get("id"))] = r
+        if str(r.get("id")) == str(guild_id):
+            everyone_role = r
+
+    if not everyone_role:
+        print("Couldn't find @everyone role in guild roles!")
+        # but continue
+
+    # 4) GET member info (bot as a guild member)
+    try:
+        member_body, member_code = http_get(f"/guilds/{guild_id}/members/{bot_id}")
+    except HTTPError as e:
+        # show helpful body
+        print("GET member HTTPError:", e.code, e.reason)
+        try:
+            print("Body:", e.read().decode("utf-8"))
+        except:
+            pass
+        return
+    except Exception as e:
+        print("GET member failed:", e)
+        return
+
+    member = json.loads(member_body)
+    member_roles = [str(r) for r in member.get("roles", [])]
+    print("Bot has member roles:", member_roles)
+
+    # 5) Compute base perms: union of @everyone + each role the bot has
+    base_perms = 0
+    if everyone_role:
+        base_perms |= int(everyone_role.get("permissions", "0"))
+    for rid in member_roles:
+        r = role_map.get(rid)
+        if r:
+            base_perms |= int(r.get("permissions", "0"))
+
+    print("Base perms (bitmask):", base_perms)
+    print("  ADMINISTRATOR bit set:", bool(base_perms & PERM_ADMIN))
+
+    # 6) Compute effective channel perms using overwrites
+    # Overwrites format: {id, type, allow, deny}
+    # Normalize overwrites if type sometimes is number
+    norm_ows = []
+    for ow in overwrites:
+        # some responses use allow/deny as ints or strings; cast to int
+        norm = {
+            "id": str(ow.get("id")),
+            "type": ow.get("type"),
+            "allow": str(ow.get("allow", "0")),
+            "deny": str(ow.get("deny", "0"))
+        }
+        norm_ows.append(norm)
+
+    eff_perms, details = compute_effective_perms(base_perms, norm_ows, member_roles, bot_id, guild_id)
+    print("Effective perms (bitmask):", eff_perms)
+    print("  ADMIN:", bool(eff_perms & PERM_ADMIN))
+    print("  VIEW_CHANNEL:", bool(eff_perms & PERM_VIEW_CHANNEL))
+    print("  MANAGE_CHANNELS:", bool(eff_perms & PERM_MANAGE_CHANNELS))
+    print("Overwrite detail (everyone_allow/deny, role_allow/deny, member_allow/deny):", details)
+
+    # extra: print any explicit deny for the bot via overwrites
+    # Check member-specific overwrite
+    for ow in norm_ows:
+        if ow["id"] == bot_id and (int(ow["deny"]) != 0 or int(ow["allow"]) != 0):
+            print("Member-specific overwrite exists:", ow)
+    # role overwrites relevant to bot
+    for ow in norm_ows:
+        if ow["id"] in member_roles:
+            if int(ow["deny"]) != 0 or int(ow["allow"]) != 0:
+                print("Role overwrite relevant to bot:", ow)
+
+    print("Done. If VIEW_CHANNEL or MANAGE_CHANNELS is False, fix role/channel overrides in Discord.")
+    return
 
 if __name__ == "__main__":
     main()
